@@ -1,0 +1,8 @@
+FALLBACK_WORDS = [
+    {"original": "apple", "translated": "яблоко"}, {"original": "book", "translated": "книга"},
+    {"original": "cat", "translated": "кот"}, {"original": "dog", "translated": "собака"},
+    {"original": "sun", "translated": "солнце"}, {"original": "water", "translated": "вода"},
+    {"original": "house", "translated": "дом"}, {"original": "car", "translated": "машина"},
+    {"original": "tree", "translated": "дерево"}, {"original": "friend", "translated": "друг"},
+    {"original": "time", "translated": "время"}, {"original": "work", "translated": "работа"}
+]

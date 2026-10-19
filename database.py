@@ -91,10 +91,61 @@ async def get_user_words_count(telegram_id:int):
         return result.scalar()
 
 
+class TestResult(Base): 
 
+    __tablename__ = 'test_results'
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,
+                                    autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer,
+                                         ForeignKey('users.id'))
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_questions: Mapped[int] = mapped_column(Integer,
+                                                 nullable=False)
+    test_date: Mapped[datetime] = mapped_column(DateTime,
+                                    server_default=func.now())
+    
+    user = relationship('User')
 
+async def save_results(telegram_id, score, total_questions):
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.telegram_id==telegram_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            user = User(telegram_id=telegram_id)
+            session.add(user)
+            await session.flush()
 
+        test_result = TestResult(
+            user_id=user.id,
+            score=score,
+            total_questions=total_questions
+        )
+        session.add(test_result)
+        await session.commit()
+
+# получение результатов
+async def get_test_result(telegram_id):
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.telegram_id==telegram_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            return 0, 0
+        
+        count_result = await session.execute(
+            select(func.count(TestResult.id)).where(TestResult.user_id==user.id)
+        )
+        test_count = count_result.scalar()
+        if test_count == 0:
+            return 0, 0
+        
+        stats_result = await session.execute(
+            select(TestResult.score, TestResult.total_questions).where(TestResult.user_id==user.id)
+        )
+        results = stats_result.scalar.all()
+        total_percentage = sum((r.score/r.total_questions)*100 for r in results)
+
+        return test_count, total_percentage
 
 
 

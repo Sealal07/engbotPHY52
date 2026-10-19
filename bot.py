@@ -19,6 +19,10 @@ from database import (
 from sqlalchemy import select
 from translator import detect_lang, translate_text
 
+from states import TestStates
+from database import save_results, get_test_result, TestResult
+import random
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 load_dotenv()
@@ -32,7 +36,14 @@ dp.include_router(router)
 
 
 MENU_BTNS = {'Пройти тест', 'Мой словарь', 'Моя статистика', 'Помощь'}
-
+FALLBACK_WORDS = [
+    {"original": "apple", "translated": "яблоко"}, {"original": "book", "translated": "книга"},
+    {"original": "cat", "translated": "кот"}, {"original": "dog", "translated": "собака"},
+    {"original": "sun", "translated": "солнце"}, {"original": "water", "translated": "вода"},
+    {"original": "house", "translated": "дом"}, {"original": "car", "translated": "машина"},
+    {"original": "tree", "translated": "дерево"}, {"original": "friend", "translated": "друг"},
+    {"original": "time", "translated": "время"}, {"original": "work", "translated": "работа"}
+]
 
 def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
@@ -77,6 +88,22 @@ async def show_vocal(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
     await message.answer(text, reply_markup=keyboard)
 
+
+@router.message(F.text == 'Пройти тест')
+async def start_test_menu(message:Message, state: FSMContext):
+    await state.set_state(TestStates.choosing_category) 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='По словарю',
+                              callback_data='test_dict')],
+        [InlineKeyboardButton(text='Случайные слова',
+                              callback_data='test_random')]                      
+    ])
+    await message.answer('Выберите категорию: ',
+                         reply_markup=keyboard)
+    
+
+
+
 @router.message(F.text, ~F.text.stratswidth('/'))
 async def handle_message(message: Message, state: FSMContext):
     text = message.text.strip()
@@ -107,6 +134,8 @@ async def handle_message(message: Message, state: FSMContext):
         text=f"Перевод: ({source_lang}->{target_lang}):\n\n({translated})",
         reply_markup=keyboard
     )
+
+# CALLBACK QUERY
 
 @router.callback_query(F.data == "add_to_dict")
 async def process_add_to_dict(callback: CallbackQuery, state: FSMContext):
@@ -141,9 +170,139 @@ async def process_add_to_dict(callback: CallbackQuery, state: FSMContext):
     await callback.answer('Добавлено в словарь!', show_alert=True)
     await state.clear()
 
+@router.callback_query(F.data.startswith('dict_page_'))
+async def handle_pagination(callback: CallbackQuery):
+    page = int(callback.data.split('_')[-1])
+    offset = page * 5
+    telegram_id = callback.from_user.id
+    words = await get_user_words(telegram_id, offset=offset, limit=5)
+    total_count = await get_user_words_count(telegram_id)
+    if not words:
+        await callback.answer('Больше слов нет', show_alert=True)
+    
+    text = f'Твой словарь: ({page+1} страница)\n\n'
+    for i, word in enumerate(words, start=offset + 1):
+        text += f'{i}. {word.original_text} - {word.translate_text}\n'
+    
+    keyboard_buttons = []
+    nav_row = []
+
+    if page > 0 :
+        nav_row.append(InlineKeyboardButton(text='<--Назад', 
+                       callback_data=f'dict_page_{page-1}'))
+    if offset+5 < total_count:
+        nav_row.append(InlineKeyboardButton(text='Вперед-->', 
+                       callback_data=f'dict_page_{page+1}'))
+    if nav_row:
+        keyboard_buttons.append(nav_row)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+    await callback.message.edit_text(text=text, 
+                                     reply_markup=keyboard)
+    await callback.answer()
 
 
-        
+@router.callback_query(F.data.startswith('test_'), 
+                       TestStates.choosing_category)
+async def generate_test(callback:CallbackQuery, state:FSMContext):
+    category = callback.data.split('_')[-1]
+    words_pool = []
+    if category == 'dict':
+        user_words = await get_user_words(callback.from_user.id,
+                                          offset=0, limit=100) 
+        words_pool = [{'original': w.original_text,
+                       'translated': w.translate_text}
+                       for w in user_words] 
+    if category == 'random' or len(words_pool) < 4:
+        words_pool = FALLBACK_WORDS.copy()
+
+    if len(words_pool) < 4:
+        await callback.message.edit_text('Недостаточно слов')
+        await state.clear()
+        return
+
+    random.shuffle(words_pool)
+    questions = words_pool[:5]
+
+    await state.update_data(
+        questions=questions,
+        current_q_index=0,
+        score=0,
+        category=category
+    )
+    await state.set_state(TestStates.in_test)
+
+    # первый вопрос
+    await send_question(callback.message, state)
+    await callback.answer()
+
+async def send_question(message: Message, state: FSMContext):
+    data = await state.get_data()
+    questions = data['questions']
+    current_idx = data['current_q_index']
+
+    if current_idx >= len(questions):
+        await finish_test(message, state)
+        return
+    
+    question = questions[current_idx]
+    correct_answer = question['translated']
+
+    all_translations = [w['translated'] for w in questions
+                        if w['translated'] != correct_answer]
+    random.shuffle(all_translations)
+    options = [correct_answer] + all_translations[:3]
+    random.shuffle(options)
+
+    await state.update_data(
+        current_options=options, correct_answer=correct_answer
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=opt, callback_data=f'answer_{i}')]
+                              for i, opt in enumerate(options)
+    ])
+
+    await message.answer(
+        f'Вопрос: {current_idx+1} из {len(questions)}\n\n'
+        f'{question['original']} - как переводится?',
+        reply_markup=keyboard
+    )
+
+@router.callback_query(F.data.startswith('answer_'), TestStates.in_test)
+async def check_answer(callback:CallbackQuery, state:FSMContext):
+    data = await state.get_data()
+    selected_idx = int(callback.data.split('_')[-1])
+    selected_answer = data['current_options'][selected_idx]
+    correct_answer = data['correct_answer']
+    is_correct = (selected_answer == correct_answer)
+    new_score = data['score'] + (1 if is_correct else 0)
+    await state.update_data(score=new_score)
+    emoji = '✅' if is_correct else '❌'
+    await callback.message.edit_text(
+        f'{emoji}'
+    )
+    await callback.answer()
+
+    await asyncio.sleep(2)
+    await callback.message.delete()
+
+    await state.update_data(current_q_index=data['current_q_index']+1)
+    await send_question(callback.message, state)
+
+async def finish_test(message:Message, state: FSMContext):
+    data = await state.get_data()
+    score = data['score']
+    total = len(data['questions'])
+
+    await save_results(message.from_user.id, score, total)
+    await state.clear()
+
+    await message.answer(
+        f'Тест завершен'
+        f'Результат: {score} из {total}',
+        reply_markup=get_main_keyboard()
+    )
 
 async def main():
     """ запуск процесса поллинга """
